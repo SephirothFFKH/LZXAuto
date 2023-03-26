@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Microsoft.Win32.TaskScheduler;
 
 
 namespace LZXAuto
@@ -13,14 +14,16 @@ namespace LZXAuto
 	class Program
 	{
         private const string TaskScheduleName = "LZXAuto";
-        private const string TaskScheduleTemplateFileName = "LZXAutoTask.xml";
 
         private readonly static LZXAutoEngine.LZXAutoEngine compressorEngine = new LZXAutoEngine.LZXAutoEngine();
 
         static void Main(string[] args)
         {
-            string thisprocessname = Process.GetCurrentProcess().ProcessName;
-            if (Process.GetProcesses().Count(p => p.ProcessName == thisprocessname) > 1)
+            var currentProcess = Process.GetCurrentProcess();
+            string currentProcessName = currentProcess.ProcessName;
+            string currentProcessPath = currentProcess.MainModule.FileName;
+
+            if (Process.GetProcesses().Count(p => p.ProcessName == currentProcessName) > 1)
             {
                 compressorEngine.Logger.Log("Another instance is already running. Exiting...", 2, LogLevel.General);
                 return;
@@ -143,70 +146,43 @@ Version number: {Assembly.GetEntryAssembly().GetName().Version}
             // Parse scheduleOn option
             if (args.Contains("/scheduleOn", StringComparer.InvariantCultureIgnoreCase))
             {
-                var currentProcess = Process.GetCurrentProcess();
-                string currentProcessPath = currentProcess.MainModule.FileName;
-
                 string requestedPath = commandLineRequestedPath;
                 if (string.IsNullOrEmpty(requestedPath))
                     requestedPath = Path.GetPathRoot(currentProcessPath);
 
-                string newCommandNode = $"<Command>\"{currentProcessPath}\"</Command>";
-                string newArgumentsNode = $"<Arguments>{requestedPath}</Arguments>";
-                string newWorkingDirectoryNode = $"<WorkingDirectory>{Path.GetDirectoryName(currentProcessPath)}</WorkingDirectory>";
+                string workingDirectory = Path.GetDirectoryName(currentProcessPath);
 
-                ReplaceTextInFile(TaskScheduleTemplateFileName, "<Command></Command>", newCommandNode);
-                ReplaceTextInFile(TaskScheduleTemplateFileName, "<Arguments></Arguments>", newArgumentsNode);
-                ReplaceTextInFile(TaskScheduleTemplateFileName, "<WorkingDirectory></WorkingDirectory>", newWorkingDirectoryNode);
-
-                try
-                {
-                    var proc = new Process();
-                    proc.StartInfo.FileName = $"schtasks";
-                    proc.StartInfo.Arguments = $"/Create /XML {TaskScheduleTemplateFileName} /tn {TaskScheduleName}";
-                    proc.StartInfo.UseShellExecute = false;
-                    proc.StartInfo.RedirectStandardOutput = true;
-                    proc.Start();
-                    proc.WaitForExit();
-                    int exitCode = proc.ExitCode;
-                    if (exitCode == 0)
-                    {
-                        Console.WriteLine("Schedule initialized");
-                    }
-                    else
-                    {
-                        Console.WriteLine("Schedule initialization failed");
-                    }
-
-                    proc.Close();
+                TaskService ts = null;
+                try {
+                    ts = new TaskService();
+                    TaskDefinition td = ts.NewTask();
+                    td.RegistrationInfo.Description = "Automatically compress files to NTFS LZX compression with minimal disk write cycles";
+                    td.Settings.AllowDemandStart = true;
+                    td.Settings.ExecutionTimeLimit = new TimeSpan (8, 0, 0);
+                    td.Triggers.Add(new DailyTrigger { DaysInterval = 7 });
+                    td.Actions.Add(new ExecAction(currentProcessPath, requestedPath, workingDirectory));
+                    ts.RootFolder.RegisterTaskDefinition(TaskScheduleName, td, TaskCreation.CreateOrUpdate, "SYSTEM", null, TaskLogonType.ServiceAccount);
+                    Console.WriteLine("Schedule initialized");
+                } catch (Exception ex) {
+                    Console.WriteLine("Schedule initialization failed due to " + ex.Message);
+                } finally {
+                    if (ts != null) ts.Dispose();
                 }
-                finally
-                {
-                    ReplaceTextInFile(TaskScheduleTemplateFileName, newCommandNode, "<Command></Command>");
-                    ReplaceTextInFile(TaskScheduleTemplateFileName, newArgumentsNode, "<Arguments></Arguments>");
-                    ReplaceTextInFile(TaskScheduleTemplateFileName, newWorkingDirectoryNode, "<WorkingDirectory></WorkingDirectory>");
-                }
-
                 return;
             }
 
             // Parse scheduleOff option
             if (args.Contains("/scheduleOff", StringComparer.InvariantCultureIgnoreCase))
             {
-                var proc = new Process();
-                proc.StartInfo.FileName = $"schtasks";
-                proc.StartInfo.Arguments = $"/Delete /tn {TaskScheduleName} /f";
-                proc.StartInfo.UseShellExecute = false;
-                proc.StartInfo.RedirectStandardOutput = true;
-                proc.Start();
-                proc.WaitForExit();
-                int exitCode = proc.ExitCode;
-                if (exitCode == 0)
-                    Console.WriteLine("Schedule deleted");
-                else
-                    Console.WriteLine("Schedule deletion failed");
-
-                proc.Close();
-
+                TaskService ts = null;
+                try {
+                    ts = new TaskService();
+                    ts.RootFolder.DeleteTask(TaskScheduleName);
+                } catch (Exception ex) {
+                    Console.WriteLine("Schedule removal failed due to " + ex.Message);
+                } finally {
+                    if (ts != null) ts.Dispose();
+                }
                 return;
             }
 
@@ -236,13 +212,6 @@ Version number: {Assembly.GetEntryAssembly().GetName().Version}
         {
             args.Cancel = false;
             compressorEngine.Cancel();
-        }
-
-        private static void ReplaceTextInFile(string fileName, string sourceText, string replacementText)
-        {
-            string text = File.ReadAllText(fileName);
-            text = text.Replace(sourceText, replacementText);
-            File.WriteAllText(fileName, text);
         }
     }
 }
